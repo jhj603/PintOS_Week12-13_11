@@ -31,8 +31,6 @@ static void process_cleanup(void);
 static bool load(const char *file_name, struct intr_frame *if_);
 static void initd(void *f_name);
 static void __do_fork(void *);
-static int parse_args(char *, char *[]);
-static void argument_stack(char *argv[], int argc, struct intr_frame *_if);
 
 /* 초기 사용자 프로세스를 위한 최소한의 동기화.
    이것은 커널이 첫 번째 사용자 프로세스가 종료될 때까지
@@ -499,6 +497,143 @@ void process_activate(struct thread *next)
 	tss_update(next);
 }
 
+
+// 문자열 target을 공백(" ") 기준으로 잘라서 각 토큰(인자)을 argv 배열에 저장하고, 인자의 개수를 반환하는 함수
+// 예: target = "echo hello world" → argv = ["echo", "hello", "world", NULL]
+int
+parse_args(char *target, char *argv[])
+{
+	int argc = 0; // 인자의 개수를 세기 위한 변수
+	char *token;
+	char *save_ptr; // strtok_r에서 파싱 상태를 유지하기 위한 포인터 (reentrant-safe)
+
+	// 첫 번째 토큰 추출. strtok_r는 문자열을 공백을 기준으로 분리
+	for (token = strtok_r(target, " ", &save_ptr);
+		 token != NULL;
+		 token = strtok_r(NULL, " ", &save_ptr)) // 이후 토큰부터는 첫 인자에 NULL 전달
+	{
+		argv[argc++] = token; // 잘라낸 인자를 argv 배열에 저장하고 argc 증가
+	}
+
+	// argv는 마지막에 NULL 포인터로 끝나야 exec 계열 함수에서 제대로 처리됨 (C 언어 컨벤션)
+	argv[argc] = NULL;
+
+	// 최종적으로 인자의 개수를 반환
+	return argc;
+}
+
+// 사용자 프로그램의 스택을 구성하여 인자들을 전달하는 함수
+void
+argument_stack(char *argv[], int argc, struct intr_frame *_if)
+{
+	uint64_t rsp_arr[argc]; // 각 인자 문자열의 시작 주소를 저장할 배열
+
+	// 문자열을 스택에 역순으로 복사
+	for (int i = argc - 1; i >= 0; i--)
+	{
+		size_t len = strlen(argv[i]) + 1;		// 문자열 길이 + 널 문자 포함
+		_if->rsp -= len;						// 스택 아래로 공간 확보
+		rsp_arr[i] = _if->rsp;					// 해당 문자열이 위치한 주소 저장
+		memcpy((void *)_if->rsp, argv[i], len); // 스택에 문자열 복사
+	}
+
+	// 16바이트 정렬 맞추기 (rsp를 16의 배수로 내림 정렬)
+	_if->rsp = _if->rsp & ~0xF; // 하위 4비트 0으로 마스킹 → 16의 배수
+
+	// x86-64 SysV ABI: 함수 진입 시 rsp % 16 == 8이 되도록 맞춘다.
+	// 이후에 NULL(8) + argv 포인터들(8*argc) + fake return(8)을 푸시할 예정이므로
+	// argc가 짝수일 경우 패딩 8바이트를 추가해 총 푸시 바이트가 16으로 나머지 8이 되도록 한다.
+	if ((argc % 2) == 0)
+	{
+		_if->rsp -= 8;
+		memset((void *)_if->rsp, 0, 8);
+	}
+
+	// NULL 값을 넣어 경계/종결을 표시 (argv[argc] = NULL)
+	_if->rsp -= 8;								 // 포인터 크기만큼 스택 아래로
+	memset((void *)_if->rsp, 0, sizeof(char *)); // 0으로 채움 (NULL)
+
+	// argv[i] 포인터들을 역순으로 push
+	for (int i = argc - 1; i >= 0; i--)
+	{
+		_if->rsp -= 8;										   // 8바이트 공간 확보
+		memcpy((void *)_if->rsp, &rsp_arr[i], sizeof(char *)); // 각 문자열의 주소를 복사
+	}
+
+	// 가짜 주소 fake return address (unused 사용하지 않음, just for conventional layout 형식적 삽입)
+	// 실제로 쓰이지 않는 가짜 리턴 주소인데, 스택 프레임의 모양을 함수 호출 규약에 맞게 유지하려고 형식적으로만 넣은 값
+	_if->rsp -= 8;
+	memset((void *)_if->rsp, 0, sizeof(void *)); // 가짜 리턴 주소 = 0
+
+	// 사용자 프로그램 시작 시 인자 전달을 위한 레지스터 설정
+	_if->R.rdi = argc;		   // 첫 번째 인자: argc
+	_if->R.rsi = _if->rsp + 8; // 두 번째 인자: argv (가짜 리턴 주소 다음부터가 argv[0] 배열)
+}
+
+struct thread *get_child_thread(tid_t child_tid)
+{
+	struct thread *current_thread = thread_current(); // 현재 실행 중인 스레드(=부모 스레드)를 가져옴
+	struct thread *result = NULL;					  // 결과를 저장할 포인터
+
+	// 현재 스레드의 자식 리스트를 순회함
+	for (struct list_elem *i = list_begin(&current_thread->children); i != list_end(&current_thread->children); i = i->next)
+	{
+		// 리스트 요소 i를 thread 구조체로 변환
+		struct thread *t = list_entry(i, struct thread, child_elem);
+
+		// 자식 스레드의 tid가 찾고자 하는 child_tid와 같다면
+		if (t->tid == child_tid)
+		{
+			result = t; // 찾은 자식 스레드를 result에 저장
+			break;		// 더 이상 탐색할 필요 없으므로 반복문 종료
+		}
+	}
+
+	return result; // 찾았으면 해당 스레드 포인터 반환, 못 찾았으면 NULL 반환
+}
+
+int process_add_file(struct file *file)
+{
+	// 현재 실행 중인 스레드(=프로세스) 가져오기
+	struct thread *current_thread = thread_current();
+
+	// 파일 디스크립터(fd)는 0~2는 이미 예약된 상태(stdin, stdout, stderr)
+	// 따라서 일반 파일은 3번부터 사용
+	for (int fd = 3; fd < MAX_FD; fd++)
+	{
+		// 현재 FDT(File Descriptor Table)에서 비어있는 슬롯 찾기
+		if (current_thread->FDT[fd] == NULL)
+		{
+			// 비어 있는 슬롯을 찾으면 해당 위치에 파일 포인터 저장
+			current_thread->FDT[fd] = file;
+
+			// 다음 검색할 fd 번호를 갱신
+			current_thread->next_FD = fd + 1;
+
+			// 성공적으로 등록한 fd 번호 반환
+			return fd;
+		}
+	}
+
+	// 모든 슬롯이 차서 더 이상 파일을 열 수 없다면 -1 반환
+	return -1;
+}
+
+struct file *process_get_file(int fd)
+{
+	struct thread *current_thread = thread_current(); // 현재 실행 중인 스레드 포인터 획득
+	if (current_thread->FDT == NULL)
+	{
+		return NULL; // FDT가 아직 준비되지 않았다면 접근할 수 있는 파일이 없음
+	}
+	if (fd < 0 || fd >= MAX_FD)
+	{
+		return NULL; // 허용 범위를 벗어난 파일 디스크립터는 무효로 간주
+	}
+	return current_thread->FDT[fd]; // 유효한 fd라면 FDT에서 대응되는 파일 포인터 반환
+}
+
+
 /* We load ELF binaries.  The following definitions are taken
  * from the ELF specification, [ELF1], more-or-less verbatim.  */
 
@@ -794,7 +929,7 @@ load_segment(struct file *file, off_t ofs, uint8_t *upage,
 
 /* USER_STACK 주소에 0으로 초기화된(page가 모두 0인) 메모리 페이지를 매핑해서 가장 기본적인 스택 공간을 마련해준다.
    Create a minimal stack by mapping a zeroed page at the USER_STACK */
-static bool
+bool
 setup_stack(struct intr_frame *if_)
 {
 	uint8_t *kpage;
@@ -810,139 +945,6 @@ setup_stack(struct intr_frame *if_)
 			palloc_free_page(kpage);
 	}
 	return success;
-}
-
-// 문자열 target을 공백(" ") 기준으로 잘라서 각 토큰(인자)을 argv 배열에 저장하고, 인자의 개수를 반환하는 함수
-// 예: target = "echo hello world" → argv = ["echo", "hello", "world", NULL]
-static int parse_args(char *target, char *argv[])
-{
-	int argc = 0; // 인자의 개수를 세기 위한 변수
-	char *token;
-	char *save_ptr; // strtok_r에서 파싱 상태를 유지하기 위한 포인터 (reentrant-safe)
-
-	// 첫 번째 토큰 추출. strtok_r는 문자열을 공백을 기준으로 분리
-	for (token = strtok_r(target, " ", &save_ptr);
-		 token != NULL;
-		 token = strtok_r(NULL, " ", &save_ptr)) // 이후 토큰부터는 첫 인자에 NULL 전달
-	{
-		argv[argc++] = token; // 잘라낸 인자를 argv 배열에 저장하고 argc 증가
-	}
-
-	// argv는 마지막에 NULL 포인터로 끝나야 exec 계열 함수에서 제대로 처리됨 (C 언어 컨벤션)
-	argv[argc] = NULL;
-
-	// 최종적으로 인자의 개수를 반환
-	return argc;
-}
-
-// 사용자 프로그램의 스택을 구성하여 인자들을 전달하는 함수
-static void argument_stack(char *argv[], int argc, struct intr_frame *_if)
-{
-	uint64_t rsp_arr[argc]; // 각 인자 문자열의 시작 주소를 저장할 배열
-
-	// 문자열을 스택에 역순으로 복사
-	for (int i = argc - 1; i >= 0; i--)
-	{
-		size_t len = strlen(argv[i]) + 1;		// 문자열 길이 + 널 문자 포함
-		_if->rsp -= len;						// 스택 아래로 공간 확보
-		rsp_arr[i] = _if->rsp;					// 해당 문자열이 위치한 주소 저장
-		memcpy((void *)_if->rsp, argv[i], len); // 스택에 문자열 복사
-	}
-
-	// 16바이트 정렬 맞추기 (rsp를 16의 배수로 내림 정렬)
-	_if->rsp = _if->rsp & ~0xF; // 하위 4비트 0으로 마스킹 → 16의 배수
-
-	// x86-64 SysV ABI: 함수 진입 시 rsp % 16 == 8이 되도록 맞춘다.
-	// 이후에 NULL(8) + argv 포인터들(8*argc) + fake return(8)을 푸시할 예정이므로
-	// argc가 짝수일 경우 패딩 8바이트를 추가해 총 푸시 바이트가 16으로 나머지 8이 되도록 한다.
-	if ((argc % 2) == 0)
-	{
-		_if->rsp -= 8;
-		memset((void *)_if->rsp, 0, 8);
-	}
-
-	// NULL 값을 넣어 경계/종결을 표시 (argv[argc] = NULL)
-	_if->rsp -= 8;								 // 포인터 크기만큼 스택 아래로
-	memset((void *)_if->rsp, 0, sizeof(char *)); // 0으로 채움 (NULL)
-
-	// argv[i] 포인터들을 역순으로 push
-	for (int i = argc - 1; i >= 0; i--)
-	{
-		_if->rsp -= 8;										   // 8바이트 공간 확보
-		memcpy((void *)_if->rsp, &rsp_arr[i], sizeof(char *)); // 각 문자열의 주소를 복사
-	}
-
-	// 가짜 주소 fake return address (unused 사용하지 않음, just for conventional layout 형식적 삽입)
-	// 실제로 쓰이지 않는 가짜 리턴 주소인데, 스택 프레임의 모양을 함수 호출 규약에 맞게 유지하려고 형식적으로만 넣은 값
-	_if->rsp -= 8;
-	memset((void *)_if->rsp, 0, sizeof(void *)); // 가짜 리턴 주소 = 0
-
-	// 사용자 프로그램 시작 시 인자 전달을 위한 레지스터 설정
-	_if->R.rdi = argc;		   // 첫 번째 인자: argc
-	_if->R.rsi = _if->rsp + 8; // 두 번째 인자: argv (가짜 리턴 주소 다음부터가 argv[0] 배열)
-}
-
-struct thread *get_child_thread(tid_t child_tid)
-{
-	struct thread *current_thread = thread_current(); // 현재 실행 중인 스레드(=부모 스레드)를 가져옴
-	struct thread *result = NULL;					  // 결과를 저장할 포인터
-
-	// 현재 스레드의 자식 리스트를 순회함
-	for (struct list_elem *i = list_begin(&current_thread->children); i != list_end(&current_thread->children); i = i->next)
-	{
-		// 리스트 요소 i를 thread 구조체로 변환
-		struct thread *t = list_entry(i, struct thread, child_elem);
-
-		// 자식 스레드의 tid가 찾고자 하는 child_tid와 같다면
-		if (t->tid == child_tid)
-		{
-			result = t; // 찾은 자식 스레드를 result에 저장
-			break;		// 더 이상 탐색할 필요 없으므로 반복문 종료
-		}
-	}
-
-	return result; // 찾았으면 해당 스레드 포인터 반환, 못 찾았으면 NULL 반환
-}
-
-int process_add_file(struct file *file)
-{
-	// 현재 실행 중인 스레드(=프로세스) 가져오기
-	struct thread *current_thread = thread_current();
-
-	// 파일 디스크립터(fd)는 0~2는 이미 예약된 상태(stdin, stdout, stderr)
-	// 따라서 일반 파일은 3번부터 사용
-	for (int fd = 3; fd < MAX_FD; fd++)
-	{
-		// 현재 FDT(File Descriptor Table)에서 비어있는 슬롯 찾기
-		if (current_thread->FDT[fd] == NULL)
-		{
-			// 비어 있는 슬롯을 찾으면 해당 위치에 파일 포인터 저장
-			current_thread->FDT[fd] = file;
-
-			// 다음 검색할 fd 번호를 갱신
-			current_thread->next_FD = fd + 1;
-
-			// 성공적으로 등록한 fd 번호 반환
-			return fd;
-		}
-	}
-
-	// 모든 슬롯이 차서 더 이상 파일을 열 수 없다면 -1 반환
-	return -1;
-}
-
-struct file *process_get_file(int fd)
-{
-	struct thread *current_thread = thread_current(); // 현재 실행 중인 스레드 포인터 획득
-	if (current_thread->FDT == NULL)
-	{
-		return NULL; // FDT가 아직 준비되지 않았다면 접근할 수 있는 파일이 없음
-	}
-	if (fd < 0 || fd >= MAX_FD)
-	{
-		return NULL; // 허용 범위를 벗어난 파일 디스크립터는 무효로 간주
-	}
-	return current_thread->FDT[fd]; // 유효한 fd라면 FDT에서 대응되는 파일 포인터 반환
 }
 
 /* Adds a mapping from user virtual address UPAGE to kernel

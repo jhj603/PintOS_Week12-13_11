@@ -11,7 +11,10 @@ void process_exit(void);
 void process_activate(struct thread *next);
 struct thread *get_child_thread(tid_t child_tid);
 
-int process_add_file(struct file *file);
+struct thread *get_child_thread(tid_t tid);
+int parse_args(char *target, char *argv[]);
+void argument_stack(char *argv[], int argc, struct intr_frame *_if);
 struct file *process_get_file(int fd);
+int process_add_file(struct file *file);
 
 #endif /* userprog/process.h */
