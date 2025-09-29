@@ -9,6 +9,7 @@ typedef bool vm_initializer (struct page *, void *aux);
 
 /* Uninitlialized page. The type for implementing the
  * "Lazy loading". */
+/* 초기화되지 않은 페이지를 위한 구조체 */
 struct uninit_page {
 	/* Initiate the contets of the page */
 	vm_initializer *init;

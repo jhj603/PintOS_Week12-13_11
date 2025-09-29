@@ -118,7 +118,10 @@ kill (struct intr_frame *f) {
    [IA32-v3a] section 5.15 "Exception and Interrupt Reference". */
 static void
 page_fault (struct intr_frame *f) {
-	bool not_present;  /* True: not-present page, false: writing r/o page. */
+	/* True: not-present page, false: writing r/o page. */
+	/* true라면 존재하지 않는 페이지에 접근 시도인 경우(Not-Present) */
+	/* false라면 읽기 전용 페이지에 쓰기 시도인 경우(Protection-Violation) */
+	bool not_present;  
 	bool write;        /* True: access was write, false: access was read. */
 	bool user;         /* True: access by user, false: access by kernel. */
 	void *fault_addr;  /* Fault address. */
@@ -136,6 +139,8 @@ page_fault (struct intr_frame *f) {
 
 
 	/* Determine cause. */
+	/* PF_P는 error_code의 가장 낮은 비트(0번 비트) */
+	/* 0이면 Not-Present 폴트, 1이면 Protection-Violation 폴트 */
 	not_present = (f->error_code & PF_P) == 0;
 	write = (f->error_code & PF_W) != 0;
 	user = (f->error_code & PF_U) != 0;

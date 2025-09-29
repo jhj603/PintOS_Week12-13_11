@@ -1,0 +1,10 @@
+{
+    "files.associations": {
+        "palloc.h": "c",
+        "hash.h": "c",
+        "uninit.h": "c",
+        "anon.h": "c",
+        "file.h": "c",
+        "vaddr.h": "c"
+    }
+}

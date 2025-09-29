@@ -18,6 +18,7 @@ static const struct page_operations anon_ops = {
 };
 
 /* Initialize the data for anonymous pages */
+/* 익명 페이지 서브시스템의 초기화 함수. */
 void
 vm_anon_init (void) {
 	/* TODO: Set up the swap_disk. */

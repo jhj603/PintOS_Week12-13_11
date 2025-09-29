@@ -23,6 +23,7 @@ static const struct page_operations uninit_ops = {
 };
 
 /* DO NOT MODIFY this function */
+/* 초기화되지 않은 페이지를 위한 구조체 생성 함수 */
 void
 uninit_new (struct page *page, void *va, vm_initializer *init,
 		enum vm_type type, void *aux,
@@ -43,6 +44,10 @@ uninit_new (struct page *page, void *va, vm_initializer *init,
 }
 
 /* Initalize the page on first fault */
+/* 초기화되지 않은 페이지를 위한 구조체 초기화 함수 */
+/* 첫 페이지 폴트 시 페이지를 초기화하는 함수. vm_initializer와 aux를 가져와 함수 포인터로 페이지 초기화 함수 호출. */
+/* 페이지 폴트 핸들러가 호출 체인을 따라가다 swap_in을 호출할 때 마지막으로 도달하는 함수. */
+/* 전체 구현은 제공되지만 설계에 따라 수정이 필요할 수 있음. */
 static bool
 uninit_initialize (struct page *page, void *kva) {
 	struct uninit_page *uninit = &page->uninit;
@@ -60,6 +65,7 @@ uninit_initialize (struct page *page, void *kva) {
  * to other page objects, it is possible to have uninit pages when the process
  * exit, which are never referenced during the execution.
  * PAGE will be freed by the caller. */
+/* 초기화되지 않은 페이지를 위한 구조체 삭제 함수 */
 static void
 uninit_destroy (struct page *page) {
 	struct uninit_page *uninit UNUSED = &page->uninit;
