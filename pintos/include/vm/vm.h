@@ -77,6 +77,9 @@ struct page {
 struct frame {
 	void *kva;	/* 커널 가상 주소 */
 	struct page *page;	/* 페이지 구조체 */
+
+	/* 전역 프레임 테이블(리스트)에 포함되기 위한 요소 */
+	struct list_elem elem;
 };
 
 /* The function table for page operations.

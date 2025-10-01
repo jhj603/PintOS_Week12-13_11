@@ -28,6 +28,9 @@
    that are ready to run but not actually running. */
 static struct list ready_list;
 
+/* 잠자는 스레드들을 관리할 전역 리스트 */
+static struct list sleep_list;
+
 /* Idle thread. */
 static struct thread *idle_thread;
 
@@ -79,6 +82,15 @@ static tid_t allocate_tid (void);
 // setup temporal gdt first.
 static uint64_t gdt[3] = { 0, 0x00af9a000000ffff, 0x00cf92000000ffff };
 
+bool cmp_priority(const struct list_elem* a, const struct list_elem* b, void* aux UNUSED)
+{
+	struct thread* t_a = list_entry(a, struct thread, elem);
+	struct thread* t_b = list_entry(b, struct thread, elem);
+
+	return t_a->priority > t_b->priority;
+}
+
+
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
    general and it is possible in this case only because loader.S
@@ -105,9 +117,10 @@ thread_init (void) {
 	};
 	lgdt (&gdt_ds);
 
-	/* Init the globla thread context */
+	/* Init the global thread context */
 	lock_init (&tid_lock);
 	list_init (&ready_list);
+	list_init(&sleep_list);
 	list_init (&destruction_req);
 
 	/* Set up a thread structure for the running thread. */
@@ -191,6 +204,21 @@ thread_create (const char *name, int priority,
 
 	/* Initialize thread. */
 	init_thread (t, name, priority);
+
+#ifdef USERPROG
+	t->fd_table = palloc_get_page(PAL_ZERO);
+	if (NULL == t->fd_table)
+	{
+		palloc_free_page(t);
+		return TID_ERROR;
+	}
+
+	t->fd_table[0] = STDIN;
+	t->fd_table[1] = STDOUT;
+
+	list_push_back(&thread_current()->child_list, &t->child_elem);
+#endif
+
 	tid = t->tid = allocate_tid ();
 
 	/* Call the kernel_thread if it scheduled.
@@ -206,6 +234,11 @@ thread_create (const char *name, int priority,
 
 	/* Add to run queue. */
 	thread_unblock (t);
+
+	if (t->priority > thread_current()->priority)
+	{
+		thread_yield();
+	}
 
 	return tid;
 }
@@ -240,7 +273,7 @@ thread_unblock (struct thread *t) {
 
 	old_level = intr_disable ();
 	ASSERT (t->status == THREAD_BLOCKED);
-	list_push_back (&ready_list, &t->elem);
+	list_insert_ordered (&ready_list, &t->elem, cmp_priority, NULL);
 	t->status = THREAD_READY;
 	intr_set_level (old_level);
 }
@@ -303,7 +336,7 @@ thread_yield (void) {
 
 	old_level = intr_disable ();
 	if (curr != idle_thread)
-		list_push_back (&ready_list, &curr->elem);
+		list_insert_ordered (&ready_list, &curr->elem, cmp_priority, NULL);
 	do_schedule (THREAD_READY);
 	intr_set_level (old_level);
 }
@@ -311,7 +344,14 @@ thread_yield (void) {
 /* Sets the current thread's priority to NEW_PRIORITY. */
 void
 thread_set_priority (int new_priority) {
-	thread_current ()->priority = new_priority;
+	struct thread* cur = thread_current();
+
+	cur->original_priority = new_priority;
+	cur->priority = new_priority;
+
+	refresh_priority();
+
+	check_preemption();
 }
 
 /* Returns the current thread's priority. */
@@ -345,6 +385,50 @@ int
 thread_get_recent_cpu (void) {
 	/* TODO: Your implementation goes here */
 	return 0;
+}
+
+static bool thread_wake_time_less(const struct list_elem* a, const struct list_elem* b)
+{
+	struct thread* t_a = list_entry(a, struct thread, elem);
+	struct thread* t_b = list_entry(b, struct thread, elem);
+
+	return t_a->wake_time < t_b->wake_time;
+}
+
+void thread_sleep(int64_t wake_time)
+{
+	struct thread* cur = thread_current();
+	enum intr_level old_level;
+
+	ASSERT(!intr_context());
+
+	old_level = intr_disable();
+
+	cur->wake_time = wake_time;
+	list_insert_ordered(&sleep_list, &cur->elem, thread_wake_time_less, NULL);
+	thread_block();
+
+	intr_set_level(old_level);
+}
+
+void thread_wake_up(int64_t ticks)
+{
+	struct list_elem* e = list_begin(&sleep_list);
+
+	while (e != list_end(&sleep_list))
+	{
+		struct thread* t = list_entry(e, struct thread, elem);
+
+		if (ticks >= t->wake_time)
+		{
+			e = list_remove(e);
+			thread_unblock(t);
+		}
+		else
+		{
+			break;
+		}
+	}
 }
 
 /* Idle thread.  Executes when no other thread is ready to run.
@@ -409,6 +493,25 @@ init_thread (struct thread *t, const char *name, int priority) {
 	t->tf.rsp = (uint64_t) t + PGSIZE - sizeof (void *);
 	t->priority = priority;
 	t->magic = THREAD_MAGIC;
+
+	t->original_priority = priority;
+	list_init(&t->donations);
+	t->wait_on_lock = NULL;
+
+#ifdef USERPROG
+	t->exit_status = 0;
+
+	list_init(&t->child_list);
+
+	sema_init(&t->wait_sema, 0);
+	sema_init(&t->free_sema, 0);
+
+	t->fd_table = NULL;
+
+	sema_init(&t->fork_sema, 0);
+
+	t->exec_file = NULL;
+#endif
 }
 
 /* Chooses and returns the next thread to be scheduled.  Should
@@ -587,4 +690,81 @@ allocate_tid (void) {
 	lock_release (&tid_lock);
 
 	return tid;
+}
+
+void check_preemption(void)
+{
+	if (list_empty(&ready_list))
+	{
+		return;
+	}
+
+	if (thread_get_priority() < list_entry(list_front(&ready_list), struct thread, elem)->priority)
+	{
+		if (intr_context())
+		{
+			intr_yield_on_return();
+		}
+		else
+		{
+			thread_yield();
+		}
+	}
+}
+
+void donate_priority(void)
+{
+	struct thread* cur = thread_current();
+	int priority = cur->priority;
+
+	for (int i = 0; i < 8; ++i)
+	{
+		if (NULL == cur->wait_on_lock)
+		{
+			break;
+		}
+
+		cur = cur->wait_on_lock->holder;
+		cur->priority = priority;
+	}
+}
+
+void remove_with_lock(struct lock* lock)
+{
+	struct thread* cur = thread_current();
+	struct list_elem* e = list_begin(&cur->donations);
+	struct thread* temp_thread = NULL;
+
+	while (e != list_end(&cur->donations))
+	{
+		temp_thread = list_entry(e, struct thread, donation_elem);
+
+		if (lock == temp_thread->wait_on_lock)
+		{
+			list_remove(&temp_thread->donation_elem);
+		}
+
+		e = list_next(e);
+	}
+}
+
+void refresh_priority(void)
+{
+	struct thread* cur = thread_current();
+
+	cur->priority = cur->original_priority;
+
+	if (list_empty(&cur->donations))
+	{
+		return;
+	}
+
+	list_sort(&cur->donations, cmp_priority, NULL);
+
+	struct thread* front = list_entry(list_front(&cur->donations), struct thread, donation_elem);
+
+	if (cur->priority < front->priority)
+	{
+		cur->priority = front->priority;
+	}
 }

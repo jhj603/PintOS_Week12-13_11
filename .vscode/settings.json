@@ -5,6 +5,15 @@
         "uninit.h": "c",
         "anon.h": "c",
         "file.h": "c",
-        "vaddr.h": "c"
+        "vaddr.h": "c",
+        "process.h": "c",
+        "typeinfo": "c",
+        "thread.h": "c",
+        "interrupt.h": "c",
+        "vm.h": "c",
+        "stop_token": "c",
+        "thread": "c",
+        "off_t.h": "c",
+        "stdint.h": "c"
     }
 }

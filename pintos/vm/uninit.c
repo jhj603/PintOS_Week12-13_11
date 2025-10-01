@@ -68,7 +68,14 @@ uninit_initialize (struct page *page, void *kva) {
 /* 초기화되지 않은 페이지를 위한 구조체 삭제 함수 */
 static void
 uninit_destroy (struct page *page) {
-	struct uninit_page *uninit UNUSED = &page->uninit;
+	struct uninit_page *uninit = &page->uninit;
 	/* TODO: Fill this function.
 	 * TODO: If you don't have anything to do, just return. */
+	/* process.c의 load_segment 함수에서 지연 로딩을 위해 malloc으로 할당한 */
+	/* lazy_load_info 구조체를 해제해줘야 함. */
+	if (uninit->aux)
+	{
+		free(uninit->aux);
+		uninit->aux = NULL;
+	}
 }

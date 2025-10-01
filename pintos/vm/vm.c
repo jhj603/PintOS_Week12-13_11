@@ -6,6 +6,13 @@
 
 #include "threads/vaddr.h"
 #include "threads/mmu.h"
+#include "threads/synch.h"
+#include "userprog/process.h"
+
+/* 전역 프레임 테이블 */
+static struct list frame_table;
+/* 프레임 테이블을 보호할 lock. 여러 스레드가 동시 접근이 가능한 공유 자원이므로 보호해야함 */
+static struct lock frame_table_lock;
 
 /* page의 가상 주소(va)를 이용해 해시 값을 생성하는 함수 */
 unsigned int page_hash(const struct hash_elem* p_, void* aux UNUSED)
@@ -39,6 +46,11 @@ vm_init (void) {
 	register_inspect_intr ();
 	/* DO NOT MODIFY UPPER LINES. */
 	/* TODO: Your code goes here. */
+
+	/* 전역 프레임 테이블 초기화 */
+	list_init(&frame_table);
+	/* 전역 프레임 테이블 보호 락 초기화 */
+	lock_init(&frame_table_lock);
 }
 
 /* Get the type of the page. This function is useful if you want to know the
@@ -225,6 +237,11 @@ vm_get_frame (void) {
 	/* 이 프레임은 아직 어떤 페이지와도 연결되지 않음 */
 	frame->page = NULL;
 
+	/* 프레임 테이블에 새로 생성된 프레임 추가 (락으로 보호) */
+	lock_acquire(&frame_table_lock);
+	list_push_back(&frame_table, &frame->elem);
+	lock_release(&frame_table_lock);
+
 	return frame;
 }
 
@@ -239,6 +256,7 @@ vm_handle_wp (struct page *page UNUSED) {
 }
 
 /* Return true on success */
+/* 페이지 폴트가 발생했을 때, 그 원인을 분석하고 해결하는 함수 */
 bool
 vm_try_handle_fault (struct intr_frame *f, void *addr, bool user, bool write, bool not_present) {
 	/* TODO: Validate the fault */
@@ -250,49 +268,35 @@ vm_try_handle_fault (struct intr_frame *f, void *addr, bool user, bool write, bo
 		return false;
 	}
 
-	/* 2. spt에서 페이지 찾기. 페이지 폴트가 발생한 가상 주소를 페이지 시작 주소로 변환 */
+	/* 2. 페이지가 이미 메모리에 있는 경우 */
+	if (!not_present)
+	{
+		/* Copy-On-Write 등을 여기서 처리. 지금은 실패 처리 */
+		return false;
+	}
+
+	/* 3. spt에서 페이지 찾기. 페이지 폴트가 발생한 가상 주소를 페이지 시작 주소로 변환 */
 	void* fault_page_addr = pg_round_down(addr);
 	struct supplemental_page_table* spt = &thread_current()->spt;
 	struct page* page = spt_find_page(spt, fault_page_addr);
 	
 	if (NULL == page)
 	{
-		/* 3. 페이지가 spt에 없는 경우 : 스택 확장 가능성 확인 */
+		/* 4. 페이지가 spt에 없는 경우 : 스택 확장 가능성 확인 */
 		/* 스택 확장 조건 */
 		/* 1) 스택 포인터보다 아래 주소에서 폴트 발생 */
 		/* 2) 스택 포인터와 너무 멀리 떨어져 있지 않음 */
 		/* 3) 스택 크기가 한계(1MB)를 넘지 않음 */
+		/* 지금은 실패 처리 */
 		return false;
 	}
 
-	/* 3. 쓰기 권한 검사 */
+	/* 4. 페이지가 spt에 있는 경우 쓰기 권한 검사 */
 	/* 쓰기 금지된 페이지에 쓰려고 한 경우 */
 	if (write && !page->writable)
 	{
 		return false;
 	}
-	
-	/* bogus 폴트라면 페이지에 내용을 로드하고 사용자 프로그램에 제어를 반환해야 함. */
-	/* bogus 페이지 폴트에는 세 가지 경우가 있음 */
-	/* 1. lazy-loaded */
-	/* vm_alloc_page_with_initializer에서 설정한 초기화 함수를 호출해 세그먼트를 lazy load함. */
-	if (VM_UNINIT == page_get_type(page))
-
-	/* 2. swap-out된 페이지 */
-	/* 3. 쓰기 보호된 페이지(Copy-On-Write 참고) */
-
-
-	/* 1. 폴트가 발생한 가상 주소의 페이지를 보조 페이지 테이블에서 찾아야 함. */
-	/* 해당 주소에 데이터가 있어야 한다면, 파일 시스템, 스왑 슬롯, 또는 0으로 채워진 페이지 등에서 */
-	/* 데이터를 가져옴. 만약 복사 시 쓰기(Copy-On-Write)를 구현했다면, 이미 프레임에 데이터가 있을 수 있음. */
-	/* 보조 페이지 테이블에 해당 주소에 데이터가 없어야 한다고 되어 있거나, 커널 가상 메모리 내 주소이거나, */
-	/* 읽기 전용 페이지에 쓰기 시도라면, 프로세스를 종료시켜야 함. */
-
-	/* 2. 페이지를 저장할 프레임을 확보. 공유를 구현했다면, 이미 프레임에 데이터가 있을 수 있음. */
-
-	/* 3. 데이터를 프레임에 불러옴(파일 시스템, 스왑, 또는 0으로 초기화 등). 공유를 구현했다면, 별도 작업이 필요 없을 수 있음 */
-
-	/* 4. 폴트가 발생한 가상 주소의 페이지 테이블 엔트리를 해당 물리 페이지로 지정. threads/mmu.c의 함수를 사용할 수 있음. */
 
 	return vm_do_claim_page (page);
 }
@@ -394,10 +398,86 @@ supplemental_page_table_init (struct supplemental_page_table *spt) {
 
 /* Copy supplemental page table from src to dst */
 /* Copy-On-Write를 위해 구현 필요 */
+/* src의 spt를 dst로 복사하는 함수. 자식 프로세스가 부모의 실행 컨텍스트를 상속받을 때(fork) 사용 */
+/* src의 모든 페이지를 순회하며 dst에 정확히 복사해야 함. uninit 페이지를 할당하고 즉시 claim 해야함. */
 bool
-supplemental_page_table_copy (struct supplemental_page_table *dst UNUSED,
-		struct supplemental_page_table *src UNUSED) {
-	return false;
+supplemental_page_table_copy (struct supplemental_page_table *dst, struct supplemental_page_table *src) 
+{
+	struct page* parent_page;
+	enum vm_type type;
+	void* upage;
+	bool writable;
+	bool success;
+
+	/* 부모의 spt(src)를 순회하기 위해 사용 */
+	struct hash_iterator iter;
+	hash_first(&iter, &src->hash_table);
+
+	while (hash_next(&iter))
+	{
+		parent_page = hash_entry(hash_cur(&iter), struct page, hash_elem);
+		type = page_get_type(parent_page);
+		upage = parent_page->va;
+		writable = parent_page->writable;
+		success = false;
+
+		/* UNINIT 페이지 : 아직 물리 메모리를 차지하지 않으므로 vm_alloc_page_with_initializer를 */
+		/* 호출해 동일한 초기화 정보를 가진 새로운 uninit 페이지를 자식에게 만들어 줌 */
+		if (VM_UNINIT == type)
+		{
+			/* 초기화 정보를 복사해 새로운 UNINIT 페이지 생성 */
+			vm_initializer* init = parent_page->uninit.init;
+			void* aux = parent_page->uninit.aux;
+
+			/* aux 데이터가 있다면 복사본을 만들어 전달(메모리 이중 해제 방지) */
+			/* lazy_load_info 같은 aux 데이터는 malloc과 memcpy로 복사해서 전달해야함 */
+			if (aux)
+			{
+				void* new_aux = malloc(sizeof(struct lazy_load_info));
+
+				if (NULL == new_aux)
+				{
+					return false;
+				}
+
+				memcpy(new_aux, aux, sizeof(struct lazy_load_info));
+				aux = new_aux;
+			}
+
+			/* 최종 타입을 넘겨줘야 함. */
+			success = vm_alloc_page_with_initializer(parent_page->uninit.type, upage, writable, init, aux);
+		}
+		/* ANON/FILE 페이지(메모리에 로드된 페이지) : 이미 물리 프레임에 내용이 있음. */	
+		else
+		{
+			/* 즉시 페이지를 할당하고 내용을 복사해야함 */
+			/* 자식 프로세스를 위해 새로운 uninit 페이지를 먼저 만듬. 이 페이지의 */
+			/* 초기화 함수는 부모의 페이지 내용을 복사하는 역할을 해야함. */
+			success = vm_alloc_page(type, upage, writable);
+
+			/* vm_alloc_page로 자식 페이지 할당 후 vm_claim_page로 즉시 물리 메모리에 올림 */
+			if (success)
+			{
+				if (vm_claim_page(upage))
+				{
+					/* 그 후, memcpy로 부모 프레임(parent_page->frame->kva)의 내용을 자식 프레임으로 복사해야함 */
+					struct page* child_page = spt_find_page(dst, upage);
+					memcpy(child_page->frame->kva, parent_page->frame->kva, PGSIZE);
+				}
+				else
+				{
+					success = false;
+				}
+			}
+		}
+
+		if (!success)
+		{
+			return false;
+		}
+	}
+
+	return true;
 }
 
 /* spt의 모든 페이지를 파괴하는데 사용되는 헬퍼 함수 */
@@ -406,13 +486,21 @@ void spt_destroy_func(struct hash_elem* e, void* aux UNUSED)
 	struct page* p = hash_entry(e, struct page, hash_elem);
 	
 	destroy(p);
+
+	free(p);
 }
 
 /* Free the resource hold by the supplemental page table */
+/* spt가 가진 모든 자원을 해제하는 함수. 프로세스가 종료될 때 호출됨 */
+/* 페이지 엔트리를 순회하며 각 페이지에 대해 destroy(page)를 호출해야함. */
 void
 supplemental_page_table_kill (struct supplemental_page_table *spt) {
 	/* TODO: Destroy all the supplemental_page_table hold by thread and
 	 * TODO: writeback all the modified contents to the storage. */
-	/* hash_destroy를 사용해 해시 테이블의 모든 요소 정리 */
-	hash_destroy(&spt->hash_table, spt_destroy_func);
+	/* hash_clear를 사용해 해시 테이블의 모든 요소 정리 */
+	/* hash_destroy는 내부적으로 버킷을 해제하는데 process_exit에서 */
+	/* supplemental_page_table_kill 함수를 호출해 버킷을 해제한 다음 */
+	/* 호출되는 process_cleanup에서도 똑같은 함수를 호출하기 때문에 이중 해제가 */
+	/* 될 수 있음. 따라서 hash_destroy를 쓰기보다 hash_clear를 사용하는 것 */
+	hash_clear(&spt->hash_table, spt_destroy_func);
 }
