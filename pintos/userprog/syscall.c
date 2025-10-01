@@ -514,9 +514,24 @@ void vali_pointer(const void *user_addr, size_t size)
    - 현재 프로세스의 페이지 테이블에 매핑되어 있는지 확인 */
 bool check_page(const void *user_addr)
 {
-    return user_addr != NULL &&
-           is_user_vaddr(user_addr) &&
-           pml4_get_page(thread_current()->pml4, user_addr) != NULL;
+    // NULL이거나 커널 영역 주소면 잘못된 접근
+    if (user_addr == NULL || !is_user_vaddr(user_addr)) {
+        return false;
+    }
+
+#ifdef VM
+    // VM이 활성화된 경우에는 SPT에서 페이지 존재 여부를 확인한다.
+    struct thread *current_thread = thread_current();
+    struct page *page = spt_find_page(&current_thread->spt, user_addr);
+
+    if (page != NULL) {
+        return true;
+    }
+    return false;
+#else
+    // VM을 사용하지 않을때는 직접 page table에서 매핑 여부를 확인한다.
+    return pml4_get_page(thread_current()->pml4, user_addr) != NULL;
+#endif
 }
 
 /* 파일을 삭제하는 시스템콜 핸들러 */
