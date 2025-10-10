@@ -16,6 +16,7 @@
 #include "threads/init.h"
 #include "threads/interrupt.h"
 #include "threads/palloc.h"
+#include "threads/malloc.h"
 #include "threads/thread.h"
 #include "threads/synch.h"
 #include "threads/mmu.h"
@@ -39,6 +40,7 @@ static void __do_fork(void *);
 static struct semaphore initd_sema;
 // extern → 다른 파일에 정의된 전역 변수를 여기서 참조하겠다는 의미
 extern bool thread_tests; /* threads/init.c 파일 안에서 정의되어 있다 */
+extern struct lock filesys_lock;
 
 /* initd 및 다른 사용자 프로세스를 위한 공통 초기화 함수. */
 static void
@@ -427,21 +429,42 @@ void process_exit(void)
 	// 현재 종료 중인 프로세스(thread)를 가져옴
 	struct thread *current_thread = thread_current();
 
+	/* 파일 시스템 락을 잡은 상태로 진입했다면 먼저 풀어줘서
+	 * 종료 과정에서의 재진입 락 획득을 막는다. */
+	bool released_filesys_lock = false;
+	if (lock_held_by_current_thread(&filesys_lock)) {
+		lock_release(&filesys_lock);
+		released_filesys_lock = true;
+	}
+
 	// 파일 디스크럽터 테이블(FDT)이 존재한다면 열린 파일을 모두 닫는다.
 	if (current_thread->FDT != NULL)
 	{
 		for (int fd = 0; fd < MAX_FD; fd++)
 		{
-			if (current_thread->FDT[fd] != NULL)
-			{
-				syscall_close(fd); // dup_count와 STDIN/STDOUT 카운트를 반영하며 안전하게 닫기
+			if (current_thread->FDT[fd] != NULL) {
+				syscall_close(fd);
 			}
 		}
 		// 파일 디스크럽터 테이블에 할당했던 메모리 해제
 		palloc_free_multiple(current_thread->FDT, FDT_PAGES);
 	}
 
-	file_close(current_thread->running_file);
+	if (released_filesys_lock) {
+		lock_acquire(&filesys_lock);
+	}
+
+	if (current_thread->running_file != NULL) {
+		bool lock_held = lock_held_by_current_thread(&filesys_lock);
+		if (!lock_held) {
+			lock_acquire(&filesys_lock);
+		}
+		file_close(current_thread->running_file);
+		if (!lock_held) {
+			lock_release(&filesys_lock);
+		}
+		current_thread->running_file = NULL;
+	}
 
 	// syscall의 exit에서 exit_status 설정이 선행되어야함
 	if (current_thread->parent != NULL)
@@ -715,9 +738,11 @@ load(const char *file_name, struct intr_frame *if_)
 	process_activate(thread_current());
 
 	/* 실행 파일을 연다. */
+	lock_acquire(&filesys_lock);
 	file = filesys_open(file_name);
 	if (file == NULL)
 	{
+		lock_release(&filesys_lock);
 		printf("load: %s: open failed\n", file_name);
 		goto done;
 	}
@@ -805,7 +830,9 @@ load(const char *file_name, struct intr_frame *if_)
 
 done:
 	/* 로드 결과와 관계없이 항상 이 지점에 도달한다. */
-	// file_close (file);
+	if (file != NULL) {
+		lock_release(&filesys_lock);
+	}
 	return success;
 }
 
@@ -964,14 +991,17 @@ lazy_load_segment(struct page *page, void *aux)
 	if (file_read(lazy_load_arg->file, page->frame->kva, lazy_load_arg->read_bytes) != (int) (lazy_load_arg->read_bytes)) {
 		// 실패 시 물리 페이지 해제 후 false로 반환
 		palloc_free_page(page->frame->kva);
+		free(lazy_load_arg); // 보조 정보 구조체도 함께 정리한다.
 		return false;
 	}
 
 	// 나머지 영역은 0으로 초기화
 	memset(page->frame->kva + lazy_load_arg->read_bytes, 0, lazy_load_arg->zero_bytes);
+	free(lazy_load_arg); // 페이지 초기화가 끝났으므로 aux 메모리를 회수한다.
 
 	return true;
 }
+
 
 /* FILE에서 OFS 오프셋부터 시작하는 세그먼트를 UPAGE에 적재한다.
  * READ_BYTES와 ZERO_BYTES만큼의 가상 메모리를 다음과 같이 준비한다.

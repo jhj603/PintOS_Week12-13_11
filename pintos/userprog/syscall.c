@@ -36,10 +36,10 @@ static struct file stdout_dummy; // STDOUT을 나타내기 위한 더미 file �
 
 void syscall_entry(void);
 void syscall_handler(struct intr_frame *);
-void usr_address_vali(const void *addr);
+void usr_address_vali(const void *addr, bool write);
 bool copy_user_string(char *dst, const char *src, size_t max_len);
-bool check_page(const void *user_addr);
-void vali_pointer(const void *user_addr, size_t size);
+bool check_page(const void *user_addr, bool write);
+void vali_pointer(const void *user_addr, size_t size, bool write);
 void vali_string(const char *str);
 
 /* System call.
@@ -77,6 +77,10 @@ void syscall_init(void)
 /* The main system call interface */
 void syscall_handler(struct intr_frame *f)
 {
+    #ifdef VM
+        // 커널 모드로 전환될 때 (시스템 콜이 호출될 때) syscall_handler 함수에서 스택 포인터를 저장한다.
+        thread_current()->rsp = f->rsp;
+    #endif
     /*
         SYS_HALT,                   Halt the operating system.
         SYS_EXIT,                   Terminate this process.
@@ -319,7 +323,7 @@ void syscall_close(int fd)
 
 int syscall_write(int fd, const void *buffer, unsigned size)
 {
-    vali_pointer(buffer, size); // 사용자 버퍼가 유효한 커널 접근 범위인지 확인
+    vali_pointer(buffer, size, false); // 사용자 버퍼가 유효한 커널 접근 범위인지 확인
 
     struct thread *current = thread_current();                      // 현재 스레드 포인터 확보
     struct file *file = process_get_file(fd);                       // fd에 대응되는 파일 객체 조회
@@ -365,7 +369,7 @@ int syscall_write(int fd, const void *buffer, unsigned size)
 
 int syscall_read(int fd, void *buffer, unsigned size)
 {
-    vali_pointer(buffer, size); // 사용자 버퍼가 커널에서 접근 가능한지 확인
+    vali_pointer(buffer, size, true); // 사용자 버퍼가 커널에서 접근 가능한지 확인
 
     struct thread *current = thread_current();                      // 현재 스레드 포인터 확보
     struct file *file = process_get_file(fd);                       // fd에 연결된 파일 객체 조회
@@ -425,7 +429,7 @@ int syscall_filesize(int fd)
 int syscall_open(const char *file_name)
 {
     // 사용자 포인터 유효성 검사 (커널 주소/NULL/미매핑 주소 거부)
-    usr_address_vali(file_name);
+    usr_address_vali(file_name, false);
 
     // 파일 시스템 접근을 위한 락 획득
     lock_acquire(&filesys_lock);
@@ -464,7 +468,7 @@ void vali_string(const char *str)
 {
     for (const char *p = str;; p++)
     {
-        vali_pointer(p, 1); // 현재 문자가 존재하는 1바이트 주소가 유효한지 확인
+        vali_pointer(p, 1, false); // 현재 문자가 존재하는 1바이트 주소가 유효한지 확인
         if (*p == '\0')
         {
             break; // 문자열 끝(널 문자)에 도달하면 검사 종료
@@ -476,7 +480,7 @@ void vali_string(const char *str)
    페이지 단위로 하나씩 순회하며 모두 접근 가능한지 확인
    → 접근 불가능한 주소가 포함되어 있으면 프로세스를 종료함 (syscall_exit(-1))
    → 사용 예: read(), write(), exec() 등에서 전달받은 사용자 버퍼 검증 */
-void vali_pointer(const void *user_addr, size_t size)
+void vali_pointer(const void *user_addr, size_t size, bool write)
 {
     if (size == 0)
     {
@@ -489,18 +493,12 @@ void vali_pointer(const void *user_addr, size_t size)
     // 검사할 전체 영역을 페이지 단위로 나누어 한 페이지씩 접근 가능 여부를 확인
     while (byte_left > 0)
     {
-        // 현재 check_ptr 포인터가 가리키는 주소가 사용자 영역에 있고
-        // 실제로 물리 메모리에 매핑되어 있는지 확인
-        if (!check_page(check_ptr))
+        if (!check_page(check_ptr, write))
         {
             syscall_exit(-1); // 잘못된 주소일 경우, 즉시 프로세스 종료
         }
 
-        // 현재 페이지에서 끝까지 남은 바이트 수 계산
-        /* pg_ofs() - 예를 들어, 페이지 크기가 4KB라면, 0~4095 바이트 범위 안에서 어느 지점에 데이터가 있는지를 나타내는 값이 offset입니다 */
         size_t page_left = PGSIZE - pg_ofs(check_ptr);
-
-        // 남은 전체 바이트와 현재 페이지에서 가능한 바이트 중 더 작은 만큼만 이동
         size_t chunk = byte_left < page_left ? byte_left : page_left;
 
         check_ptr += chunk; // 검사할 포인터를 다음 영역으로 이동
@@ -512,7 +510,7 @@ void vali_pointer(const void *user_addr, size_t size)
    - NULL이 아니고
    - 사용자 영역에 속하며
    - 현재 프로세스의 페이지 테이블에 매핑되어 있는지 확인 */
-bool check_page(const void *user_addr)
+bool check_page(const void *user_addr, bool write)
 {
     // NULL이거나 커널 영역 주소면 잘못된 접근
     if (user_addr == NULL || !is_user_vaddr(user_addr)) {
@@ -525,12 +523,25 @@ bool check_page(const void *user_addr)
     struct page *page = spt_find_page(&current_thread->spt, user_addr);
 
     if (page != NULL) {
+        if (write && !page->writable) {
+            return false;
+        }
         return true;
     }
+
+    // page가 없어도 스택 성장 범위 내라면 lazy allocation에 맡긴다.
+    if (user_addr >= (void *)(USER_STACK - (1 << 20)) && user_addr < (void *)USER_STACK) {
+        return true;
+    }
+    // 그 외 주소는 잘못된 접근으로 간주한다.
     return false;
 #else
     // VM을 사용하지 않을때는 직접 page table에서 매핑 여부를 확인한다.
-    return pml4_get_page(thread_current()->pml4, user_addr) != NULL;
+    void *kernel_addr = pml4_get_page(thread_current()->pml4, user_addr);
+    if (kernel_addr == NULL) {
+        return false;
+    }
+    return true;
 #endif
 }
 
@@ -538,7 +549,7 @@ bool check_page(const void *user_addr)
 bool syscall_remove(const char *file)
 {
     // 사용자 포인터 유효성 검사 (커널 주소/NULL/미매핑 주소 거부)
-    usr_address_vali(file);
+    usr_address_vali(file, false);
     // 파일 시스템에서 해당 경로의 파일 삭제 시도, 성공 여부 반환
     return filesys_remove(file);
 }
@@ -547,19 +558,19 @@ bool syscall_remove(const char *file)
 bool syscall_create(const char *file, unsigned initial_size)
 {
     // 사용자 포인터 유효성 검사 (커널 주소/NULL/미매핑 주소 거부)
-    usr_address_vali(file);
-    // 파일 시스템에 새 파일 생성 (초기 크기 지정), 성공 여부 반환 (boolean)
-    return filesys_create(file, initial_size);
+    usr_address_vali(file, false);
+
+    lock_acquire(&filesys_lock);
+    bool success = filesys_create(file, initial_size);
+    lock_release(&filesys_lock);
+
+    return success;
 }
 
 /* 사용자 주소 유효성 검증 유틸리티 */
-void usr_address_vali(const void *addr)
+void usr_address_vali(const void *addr, bool write)
 {
-    // 다음 중 하나라도 해당하면 프로세스를 종료(-1)
-    // - 커널 주소 공간(is_kernel_vaddr)
-    // - NULL 포인터
-    // - 현재 프로세스의 페이지테이블(pml4)에 매핑되지 않은 주소
-    if (is_kernel_vaddr(addr) || addr == NULL || pml4_get_page(thread_current()->pml4, addr) == NULL)
+    if (!check_page(addr, write))
     {
         syscall_exit(-1); // 잘못된 사용자 포인터는 즉시 종료
     }
@@ -568,7 +579,7 @@ void usr_address_vali(const void *addr)
 pid_t syscall_fork(const char *name, struct intr_frame *f)
 {
     // 사용자 영역 포인터인지, 유효한 페이지에 매핑되어 있는지 선행 검사
-    usr_address_vali(name);
+    usr_address_vali(name, false);
     tid_t child = process_fork(name, f);
     // thread_create 실패 시 TID_ERROR가 내려오므로 PID_ERROR로 변환해 반환
     return child == TID_ERROR ? PID_ERROR : child;
@@ -582,7 +593,7 @@ int syscall_wait(int pid)
 int syscall_exec(const char *cmd_line)
 {
     // 유효한 주소인지 검사
-    usr_address_vali(cmd_line);
+    usr_address_vali(cmd_line, false);
 
     // 사용자로부터 받은 문자열(cmd_line)을 복사할 커널 영역의 페이지를 할당
     // PAL_ZERO는 할당된 메모리를 0으로 초기화하라는 의미
@@ -617,7 +628,7 @@ bool copy_user_string(char *dst, const char *src, size_t max_len)
     for (size_t i = 0; i < max_len; i++)
     {
         /* 매 바이트 접근 전에 해당 주소가 사용자 영역인지 검사한다. */
-        usr_address_vali(src + i);
+        usr_address_vali(src + i, false);
         char c = src[i];
         dst[i] = c;
         /* NULL 문자를 만났다면 복사가 완료된 것. */
