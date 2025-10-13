@@ -178,6 +178,10 @@ void *mmap(void *addr, size_t length, int writable, int fd, off_t offset)
         return NULL;
     }
 
+    if (!is_user_vaddr(addr) || !is_user_vaddr(addr + length)){
+        return NULL;
+    }
+
     if (spt_find_page(&thread_current()->spt, addr)) {
         return NULL;
     }

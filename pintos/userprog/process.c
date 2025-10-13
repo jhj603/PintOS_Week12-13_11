@@ -465,6 +465,9 @@ void process_exit(void)
 		}
 		current_thread->running_file = NULL;
 	}
+	
+	process_cleanup();
+	hash_destroy(&current_thread->spt.spt_hash, NULL);
 
 	// syscall의 exit에서 exit_status 설정이 선행되어야함
 	if (current_thread->parent != NULL)
@@ -477,7 +480,6 @@ void process_exit(void)
 		}
 	}
 
-	process_cleanup();
 }
 
 /* 현재 프로세스가 보유한 자원을 해제한다. */
