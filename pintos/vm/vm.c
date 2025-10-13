@@ -3,7 +3,9 @@
 #include "threads/malloc.h"
 #include "vm/vm.h"
 #include "vm/inspect.h"
+#include "vm/file.h"
 #include "threads/mmu.h" // pml4 함수 모듈
+#include <string.h>
 
 uint64_t page_hash(const struct hash_elem *e, void *aux);
 bool page_less(const struct hash_elem *a, const struct hash_elem *b, void *aux);
@@ -288,7 +290,11 @@ supplemental_page_table_init (struct supplemental_page_table *spt UNUSED) {
 bool
 supplemental_page_table_copy (struct supplemental_page_table *dst UNUSED,
 		struct supplemental_page_table *src UNUSED) {
-	
+	/* SPT 복사의 큰 흐름
+	   1) src SPT에 들어있는 모든 페이지 엔트리를 순회한다.
+	   2) 페이지의 유형에 따라 복제 전략이 달라진다. (UNINIT / FILE / 기타)
+	   3) 각 페이지를 dst SPT에 맞춰 새로 생성하거나, 기존 프레임 내용을 복사한다. */
+
 	// src SPT hash table을 순회할 반복자 초기화
 	struct hash_iterator i;
 	hash_first(&i, &src->spt_hash);
@@ -299,7 +305,10 @@ supplemental_page_table_copy (struct supplemental_page_table *dst UNUSED,
 		enum vm_type src_type = src_page->operations->type;
 
 		if (src_type == VM_UNINIT) {
-			// lazy load용 uninit 페이지는 보조 정보(aux)까지 깊은 복사를 수행한다.
+			/* UNINIT 페이지 복제
+			   lazy load를 사용하려고 미리 등록해 둔 페이지다.
+			   부모의 보조 정보(aux)를 공유하면 double free 위험이 있으므로
+			   새 구조체를 할당해 내용만 복사한다. */
 			void *aux = src_page->uninit.aux;
 			void *aux_copy = NULL;
 			if (aux != NULL) {
@@ -320,8 +329,27 @@ supplemental_page_table_copy (struct supplemental_page_table *dst UNUSED,
 				free(aux_copy);
 				return false;
 			}
+		} else if (src_type == VM_FILE) {
+			// file-backed 페이지는 복사된 aux 정보로 등록
+			struct lazy_load_arg *aux = malloc(sizeof(struct lazy_load_arg));
+			aux->file = src_page->file.file;
+			aux->ofs = src_page->file.ofs;
+			aux->read_bytes = src_page->file.read_bytes;
+
+			// dst SPT에 페이지 등록
+			if (!vm_alloc_page_with_initializer(src_type, src_page->va, src_page->writable, NULL, aux)) {
+				return false;
+			}
+
+			// 초기화 및 매핑 설정 (공유 프레임 사용)
+			struct page *dst_page = spt_find_page(dst, src_page->va);
+			file_backed_initializer(dst_page, src_type, NULL);
+			dst_page->frame = src_page->frame;
+			pml4_set_page(thread_current()->pml4, dst_page->va, src_page->frame->kva, src_page->writable);
 		} else {
-			// 이미 초기화된 페이지는 새로 할당하고 데이터를 복사한다.
+			/* 이미 초기화된 페이지 복제
+			   부모가 실제 물리 프레임을 가지고 있는 상태이므로
+			   새로 페이지를 할당하고 claim한 뒤, 내용을 그대로 memcpy한다. */
 			if (vm_alloc_page(src_type, src_page->va, src_page->writable) && vm_claim_page(src_page->va)) {
 				struct page *dst_page = spt_find_page(dst, src_page->va);
 				memcpy(dst_page->frame->kva, src_page->frame->kva, PGSIZE);

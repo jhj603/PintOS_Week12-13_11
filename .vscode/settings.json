@@ -61,7 +61,9 @@
         "cstdbool": "c",
         "typeinfo": "c",
         "hash.h": "c",
-        "uninit.h": "c"
+        "uninit.h": "c",
+        "file.h": "c",
+        "mmu.h": "c"
     },
     "C_Cpp.errorSquiggles": "disabled"
 }

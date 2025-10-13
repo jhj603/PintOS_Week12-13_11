@@ -18,6 +18,9 @@
 #include "filesys/filesys.h"    // 파일 시스템 전반에 대한 함수 및 초기화/포맷 인터페이스
 #include "filesys/file.h"       // 개별 파일 객체(file 구조체) 및 파일 입출력 함수 정의 (read, write 등)
 #include "devices/input.h"
+#ifdef VM
+#include "vm/file.h"
+#endif
 
 struct lock filesys_lock; // 파일 시스템 동기화용 전역 락
 
@@ -149,11 +152,46 @@ void syscall_handler(struct intr_frame *f)
     case SYS_DUP2:
         f->R.rax = syscall_dup2((int)f->R.rdi, (int)f->R.rsi); // dup2(oldfd, newfd) 요청을 처리하고 반환값을 rax에 기록
         break;
+    case SYS_MMAP:
+        f->R.rax = mmap(f->R.rdi, f->R.rsi, f->R.rdx, f->R.r10, f->R.r8);
+        break;
+    case SYS_MUNMAP:
+        munmap(f->R.rdi);
+        break;
     default:
         printf("system call!\n");
         thread_exit();
         break;
     }
+}
+void munmap(void *addr) {
+    do_munmap(addr);
+}
+
+void *mmap(void *addr, size_t length, int writable, int fd, off_t offset)
+{
+    if (!addr || addr != pg_round_down(addr)){
+        return NULL;
+    }
+
+    if ((off_t) offset != pg_round_down(offset)) {
+        return NULL;
+    }
+
+    if (spt_find_page(&thread_current()->spt, addr)) {
+        return NULL;
+    }
+
+    struct file *file = process_get_file(fd);
+    if (file == NULL) {
+        return NULL;
+    }
+
+    if (file_length(file) == 0 || (int) length <= 0) {
+        return NULL;
+    }
+
+    return do_mmap(addr, length, writable, file, offset); // 파일이 매핑된 가상 주소를 반환
 }
 
 struct file *syscall_get_std_file(int fd)

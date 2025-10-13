@@ -49,6 +49,8 @@ struct page {
 	/* 구현이 들어갈 자리 */
 	struct hash_elem hash_elem;
 	bool writable; // 이 page가 User 입장에서 쓰기가 가능한가?를 기억하는 플래그
+	int mapped_page_count;
+
 	/* 타입별 데이터는 유니온 안에 묶여 있으며,
 	 * 각 함수는 현재 활성화된 유니온을 자동으로 판별한다. */
 	union {

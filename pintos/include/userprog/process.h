@@ -17,4 +17,5 @@ void argument_stack(char *argv[], int argc, struct intr_frame *_if);
 struct file *process_get_file(int fd);
 int process_add_file(struct file *file);
 
+bool lazy_load_segment(struct page *page, void *aux);
 #endif /* userprog/process.h */

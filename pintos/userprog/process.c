@@ -978,7 +978,7 @@ install_page(void *upage, void *kpage, bool writable)
 /* 아래 코드는 프로젝트 3 이후 과제에서 사용된다.
  * 프로젝트 2에서만 사용할 구현은 위쪽 블록에 작성해야 한다. */
 
-static bool
+bool
 lazy_load_segment(struct page *page, void *aux)
 {
 	// 파일 읽기 정보가 담긴 구조체로 변환한다.
@@ -991,13 +991,11 @@ lazy_load_segment(struct page *page, void *aux)
 	if (file_read(lazy_load_arg->file, page->frame->kva, lazy_load_arg->read_bytes) != (int) (lazy_load_arg->read_bytes)) {
 		// 실패 시 물리 페이지 해제 후 false로 반환
 		palloc_free_page(page->frame->kva);
-		free(lazy_load_arg); // 보조 정보 구조체도 함께 정리한다.
 		return false;
 	}
 
 	// 나머지 영역은 0으로 초기화
 	memset(page->frame->kva + lazy_load_arg->read_bytes, 0, lazy_load_arg->zero_bytes);
-	free(lazy_load_arg); // 페이지 초기화가 끝났으므로 aux 메모리를 회수한다.
 
 	return true;
 }
