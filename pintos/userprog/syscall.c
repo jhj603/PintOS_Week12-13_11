@@ -170,28 +170,37 @@ void munmap(void *addr) {
 
 void *mmap(void *addr, size_t length, int writable, int fd, off_t offset)
 {
+    /* 파일-메모리 매핑 시 페이지 단위 정렬, 주소 유효성, 중복 매핑 여부 등을
+       선행 검증한 뒤 실제 매핑을 do_mmap()에 위임한다. */
     if (!addr || addr != pg_round_down(addr)){
+        /* 시작 주소가 NULL이거나 페이지 경계에 맞춰져 있지 않으면
+           매핑 페이지가 어긋나므로 실패한다. */
         return NULL;
     }
 
     if ((off_t) offset != pg_round_down(offset)) {
+        /* 파일 오프셋 또한 페이지 경계에 맞아야 매핑 시 계산이 단순하다. */
         return NULL;
     }
 
     if (!is_user_vaddr(addr) || !is_user_vaddr(addr + length)){
+        /* 매핑 범위가 유저 공간을 벗어나면 커널 메모리를 노출할 위험이 있다. */
         return NULL;
     }
 
     if (spt_find_page(&thread_current()->spt, addr)) {
+        /* 보조 페이지 테이블에 이미 같은 시작 주소가 존재하면 중복 매핑이므로 거부한다. */
         return NULL;
     }
 
     struct file *file = process_get_file(fd);
     if (file == NULL) {
+        /* 잘못된 파일 디스크립터거나 닫힌 파일이면 매핑할 수 없다. */
         return NULL;
     }
 
     if (file_length(file) == 0 || (int) length <= 0) {
+        /* 빈 파일 또는 잘못된 매핑 길이는 의미가 없어 즉시 실패 처리한다. */
         return NULL;
     }
 
