@@ -57,6 +57,8 @@ struct page {
 	bool writable;
 	/* 물리 메모리에 로드됐는지 여부 */
 	bool is_loaded;
+	/* 매핑된 페이지 개수 */
+	int mapped_page_count;
 	/* 해시 테이블의 노드가 되기 위한 필수 멤버 */
 	struct hash_elem hash_elem;
 
@@ -137,5 +139,7 @@ bool vm_alloc_page_with_initializer (enum vm_type type, void *upage,
 void vm_dealloc_page (struct page *page);
 bool vm_claim_page (void *va);
 enum vm_type page_get_type (struct page *page);
+
+void vm_free_frame(struct frame* frame);
 
 #endif  /* VM_VM_H */

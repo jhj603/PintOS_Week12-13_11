@@ -6,6 +6,8 @@
 #include "threads/thread.h"
 #include "intrinsic.h"
 
+#include "userprog/syscall.h"
+
 /* Number of page faults processed. */
 static long long page_fault_cnt;
 
@@ -139,7 +141,6 @@ page_fault (struct intr_frame *f) {
 	   be assured of reading CR2 before it changed). */
 	intr_enable ();
 
-
 	/* Determine cause. */
 	/* PF_P는 error_code의 가장 낮은 비트(0번 비트) */
 	/* 0이면 Not-Present 폴트, 1이면 Protection-Violation 폴트 */
@@ -147,11 +148,25 @@ page_fault (struct intr_frame *f) {
 	write = (f->error_code & PF_W) != 0;
 	user = (f->error_code & PF_U) != 0;
 
+	// if ((!not_present && write) || ((0x4000 > fault_addr) || (USER_STACK <= fault_addr)))
+	// {
+	// 	sys_exit(-1);
+	// }
+
 #ifdef VM
 	/* For project 3 and later. */
+	if (user)
+	{
+		/* 유저 모드에서 발생한 페이지 폴트라면, rsp를 저장해 */
+		/* 커널 모드에서 발생한 후속 폴트에서 사용 */
+		thread_current()->user_rsp = f->rsp;
+	}
+
 	if (vm_try_handle_fault (f, fault_addr, user, write, not_present))
 		return;
 #endif
+
+	sys_exit(-1);
 
 	/* Count page faults. */
 	page_fault_cnt++;

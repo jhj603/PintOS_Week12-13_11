@@ -31,10 +31,11 @@ typedef int tid_t;
 #define PRI_MAX 63                      /* Highest priority. */
 
 #ifdef USERPROG
-#define FDT_COUNT_LIMIT 512
+#define FDT_PAGES 3
+#define FDCOUNT_LIMIT FDT_PAGES * (1 << 9)
 
-#define STDIN (struct file*)1
-#define STDOUT (struct file*)2
+#define STDIN 1
+#define STDOUT 2
 #endif
 
 /* A kernel thread or user process.
@@ -110,25 +111,26 @@ struct thread {
 
 	int exit_status;
 
+	//int fd_idx;
 	struct file** fd_table;
 
 	struct file* exec_file;
 
-	struct intr_frame* parent_if;
+	struct intr_frame parent_if;
 
 	struct list child_list;
-
 	struct list_elem child_elem;
 
 	struct semaphore wait_sema;
-
 	struct semaphore free_sema;
-
 	struct semaphore fork_sema;
 #endif
 #ifdef VM
 	/* Table for whole virtual memory owned by thread. */
 	struct supplemental_page_table spt;
+
+	/* 유저 모드에서 커널 모드로 전환될 때 유저 rsp를 저장할 변수 */
+	void* user_rsp;
 #endif
 
 	/* Owned by thread.c. */

@@ -30,4 +30,14 @@ int process_wait (tid_t);
 void process_exit (void);
 void process_activate (struct thread *next);
 
+struct thread* get_child_process(tid_t tid);
+int process_add_file(struct file* f);
+struct file* process_get_file(int fd);
+int process_close_file(int fd);
+int process_insert_file(int fd, struct file* f);
+
+#ifdef VM
+bool lazy_load_segment (struct page *page, void *aux);
+#endif
+
 #endif /* userprog/process.h */

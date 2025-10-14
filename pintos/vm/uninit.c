@@ -73,7 +73,7 @@ uninit_destroy (struct page *page) {
 	 * TODO: If you don't have anything to do, just return. */
 	/* process.c의 load_segment 함수에서 지연 로딩을 위해 malloc으로 할당한 */
 	/* lazy_load_info 구조체를 해제해줘야 함. */
-	if (uninit->aux)
+	if (uninit->aux && (VM_FILE == (uninit->type)))
 	{
 		free(uninit->aux);
 		uninit->aux = NULL;
