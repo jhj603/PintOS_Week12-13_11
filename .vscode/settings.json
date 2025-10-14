@@ -63,7 +63,8 @@
         "hash.h": "c",
         "uninit.h": "c",
         "file.h": "c",
-        "mmu.h": "c"
+        "mmu.h": "c",
+        "vaddr.h": "c"
     },
     "C_Cpp.errorSquiggles": "disabled"
 }

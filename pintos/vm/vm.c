@@ -13,6 +13,7 @@ void hash_page_destroy(struct hash_elem *e, void *aux);
 
 struct list frame_table;	// 현재 할당된 frame 추적, 관리용 리스트
 struct lock frame_lock;		// frame table 접근 동기화를 위한 전역 락
+struct list_elem *next = NULL;	// victim 선정용 전역 포인터
 
 /* 각 서브시스템의 초기화 코드를 호출하여 가상 메모리 서브시스템을 초기화한다. */
 void
@@ -130,7 +131,24 @@ spt_remove_page (struct supplemental_page_table *spt, struct page *page) {
 static struct frame *
 vm_get_victim (void) {
 	struct frame *victim = NULL;
-	 /* TODO: 어떤 페이지를 추방할지는 전적으로 구현자에게 달려 있다. */
+
+	lock_acquire(&frame_lock);	// frame 테이블 접근 동기화
+
+	// frame_table 순회하며 교체 대상 탐색
+	for (next = list_begin(&frame_table); next != list_end(&frame_table); next = list_next(next)) {
+		victim = list_entry(next, struct frame, frame_elem);
+
+		// 최근 접근된 페이지라면 accessed 비트만 초기화 (생존 기회 부여)
+		if (pml4_is_accessed(thread_current()->pml4, victim->page->va)) {
+			pml4_set_accessed(thread_current()->pml4, victim->page->va, false);
+		} else {
+			// 접근되지 않은 페이지라면 victim으로 선정
+			lock_release(&frame_lock);
+			return victim;
+		}
+	}
+	// 순회 끝까지 갔을 경우 마지막으로 본 frame 반환 (fallback)
+	lock_release(&frame_lock);
 
 	return victim;
 }
@@ -139,10 +157,14 @@ vm_get_victim (void) {
  * 실패하면 NULL을 반환한다. */
 static struct frame *
 vm_evict_frame (void) {
-	struct frame *victim UNUSED = vm_get_victim ();
-	/* TODO: 선택된 프레임을 스왑 아웃한 뒤 그 프레임을 반환한다. */
+	struct frame *victim UNUSED = vm_get_victim ();	// 교체할 frame 선택
 
-	return NULL;
+	// frame에 매핑된 페이지가 있으면 swap out
+	if (victim->page) {
+		swap_out(victim->page);
+	}
+
+	return victim; // 빈 frame 반환
 }
 
 /* palloc()을 통해 프레임을 얻는다. 여유 페이지가 없다면 추방을 수행해 프레임을 돌려준다.
@@ -196,8 +218,6 @@ vm_try_handle_fault (struct intr_frame *f UNUSED, void *addr UNUSED,
 		bool user UNUSED, bool write UNUSED, bool not_present UNUSED) {
 
 	struct supplemental_page_table *spt UNUSED = &thread_current ()->spt;
-	/* TODO: 페이지 폴트가 유효한지 검증한다. */
-	/* TODO: 여기에 코드를 작성하세요 */
 	// 유효하지 않은 주소(커널 영역 또는 NULL) 접근은 처리 불가
 	if (addr == NULL || is_kernel_vaddr(addr)) {
 		return false;

@@ -1,5 +1,5 @@
 exec-bad-ptr PASS
-swap-iter FAIL
+swap-iter PASS
 sm-full PASS
 rox-simple PASS
 page-linear PASS
@@ -21,13 +21,13 @@ mmap-overlap PASS
 create-normal PASS
 priority-donate-lower PASS
 mmap-misalign PASS
-swap-anon FAIL
+swap-anon PASS
 bad-write PASS
 open-twice PASS
 page-shuffle PASS
 exec-missing PASS
 exec-arg PASS
-page-merge-mm FAIL
+page-merge-mm PASS
 read-bad-ptr PASS
 create-long PASS
 mmap-remove PASS
@@ -60,7 +60,7 @@ mmap-zero-len PASS
 open-null PASS
 page-parallel PASS
 sm-seq-random PASS
-page-merge-stk PASS
+page-merge-stk FAIL
 bad-write2 PASS
 sm-seq-block PASS
 multi-recurse PASS
@@ -77,7 +77,7 @@ wait-bad-pid PASS
 lg-create PASS
 pt-grow-bad PASS
 mmap-twice PASS
-pt-grow-stk-sc PASS
+pt-grow-stk-sc FAIL
 exec-read PASS
 priority-sema PASS
 read-boundary PASS
@@ -92,13 +92,13 @@ sm-random PASS
 alarm-zero PASS
 open-boundary PASS
 create-null PASS
-pt-grow-stack PASS
+pt-grow-stack FAIL
 fork-recursive PASS
 open-bad-ptr PASS
 mmap-inherit PASS
 mmap-unmap PASS
 write-normal PASS
-mmap-off PASS
+mmap-off FAIL
 mmap-over-code PASS
 mmap-close PASS
 bad-read PASS
@@ -109,7 +109,7 @@ priority-change PASS
 write-boundary PASS
 wait-killed PASS
 lg-full PASS
-swap-file FAIL
+swap-file PASS
 close-bad-fd PASS
 alarm-negative PASS
 multi-child-fd PASS
@@ -129,7 +129,7 @@ create-exists PASS
 mmap-bad-off PASS
 open-normal PASS
 bad-jump PASS
-pt-big-stk-obj PASS
+pt-big-stk-obj FAIL
 bad-jump2 PASS
 open-missing PASS
 create-empty PASS

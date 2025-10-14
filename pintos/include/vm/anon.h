@@ -5,6 +5,7 @@ struct page;
 enum vm_type;
 
 struct anon_page {
+    size_t page_no; // 디스크 페이지 번호
 };
 
 void vm_anon_init (void);
